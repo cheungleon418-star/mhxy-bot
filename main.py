@@ -1,328 +1,621 @@
 # -*- coding: utf-8 -*-
-"""
-梦幻西游自动脚本 - 多账号主控版
+"""Safe single-window treasure-map runtime.
 
-管理5个游戏窗口，协调队长/队员任务、战斗、导航
-支持：师门任务、捉鬼任务、押镖、副本、主线
+The runtime is observation driven: capture one frame, let the state machine
+produce at most one intent, then let the executor perform at most one input.
+Dry-run is the default for both the Python API and command line.
 """
 
-import sys
-import time
+from __future__ import annotations
+
+import argparse
+from dataclasses import replace
+import json
 import logging
-import keyboard
-from datetime import datetime
+import os
+from pathlib import Path
+import sys
+import threading
+import time
+from typing import Any, Mapping, Optional
 
-from config.settings import LOOP, COMBAT, COMMON
-from core.window_group import WindowGroup
-from core.screen import ScreenManager
-from core.input_sim import InputSim
-from modules.combat import CombatHandler
-from modules.navigation import Navigator
-from modules.tasks.sect_quest import SectQuestHandler
-from modules.tasks.ghost_hunt import GhostHuntHandler
-from modules.tasks.treasure_map import TreasureMapHandler
-from modules.teleport import TeleportHandler
-from modules.station_coach import StationCoachHandler
-from core.captcha import CaptchaHandler, CaptchaType
-from core.flow_control import FlowControl
-
-# 日志配置
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("logs/mhxy_bot.log", encoding="utf-8"),
-    ],
+from config.runtime import (
+    REQUIRED_TEMPLATES,
+    ensure_data_layout,
+    load_runtime_config,
+    load_template_manifest,
+    validate_template_profile,
 )
+from core.actions import ActionIntent, ActionKind, ActionResult, SafeActionExecutor
+from core.detection import DetectionResult, TemplateDetector, TemplateManifest
+from core.frame_source import CapturedFrame, FrameSource, LiveWindowFrameSource, ReplayFrameSource, save_frame
+from core.windows import WindowBinding, WindowBindingError, enable_dpi_awareness
+from modules.tasks import TreasureMapPolicy, TreasureMapStateMachine, TreasureObservation
+
+
 logger = logging.getLogger(__name__)
 
 
+def configure_logging(log_dir: Path, *, level: int = logging.INFO) -> Path:
+    """Configure console/file logging without writing anything on import."""
+
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "mhxy_bot.log"
+    root = logging.getLogger()
+    root.setLevel(level)
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+
+    if not any(getattr(handler, "_mhxy_console", False) for handler in root.handlers):
+        console = logging.StreamHandler(sys.stdout)
+        console.setFormatter(formatter)
+        console._mhxy_console = True  # type: ignore[attr-defined]
+        root.addHandler(console)
+    if not any(getattr(handler, "_mhxy_file", None) == str(log_path) for handler in root.handlers):
+        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        file_handler._mhxy_file = str(log_path)  # type: ignore[attr-defined]
+        root.addHandler(file_handler)
+    return log_path
+
+
+def _kind_value(intent: ActionIntent) -> str:
+    return intent.kind.value if isinstance(intent.kind, ActionKind) else str(intent.kind)
+
+
 class AutoBot:
-    """全自动脚本主类"""
+    """Drive the first supported workflow: one treasure-map game window."""
 
-    def __init__(self, enable_ui: bool = False):
-        # 初始化窗口组
-        self.wg = WindowGroup()
-        logger.info(f"已加载 {len(self.wg.windows)} 个窗口")
-        for win in self.wg.windows:
-            logger.info(f"  {win.name}: @({win.x},{win.y}) {win.width}x{win.height}")
-
-        # 初始化子系统（都依赖 WindowGroup）
-        self.screen = ScreenManager(self.wg)
-        self.input = InputSim(self.wg)
-        self.combat = CombatHandler(self.wg, self.input, self.screen)
-        self.teleport = TeleportHandler(self.wg, self.input, self.screen)
-        self.station_coach = StationCoachHandler(self.wg, self.input, self.screen)
-        self.navigator = Navigator(self.wg, self.input, self.screen,
-                                   teleport=self.teleport,
-                                   station_coach=self.station_coach)
-        self.sect_quest = SectQuestHandler(self.wg, self.input, self.screen)
-        self.ghost_hunt = GhostHuntHandler(self.wg, self.input, self.screen)
-        self.captcha_handler = CaptchaHandler(self.wg, self.input, self.screen)
-        self.treasure_map = TreasureMapHandler(self.wg, self.input, self.screen)
-
-        # 流控（防检测）
-        self.flow_control = FlowControl(max_ops_per_minute=60)
-
-        # 运行状态
-        self.paused = False
-        self.running = True
+    def __init__(
+        self,
+        enable_ui: bool = False,
+        *,
+        dry_run: bool = True,
+        armed: bool = False,
+        config_path: Optional[str] = None,
+        profile: Optional[str] = None,
+        data_dir: Optional[str] = None,
+        max_maps: Optional[int] = None,
+        replay_dir: Optional[str] = None,
+        frame_source: Optional[FrameSource] = None,
+        detector: Optional[TemplateDetector] = None,
+        executor: Optional[SafeActionExecutor] = None,
+        clock: Any = time.monotonic,
+        register_hotkeys: bool = True,
+    ) -> None:
+        del enable_ui  # retained for compatibility with the old launcher API
+        self.paths = ensure_data_layout(data_dir)
+        configure_logging(self.paths.logs)
+        self.config = load_runtime_config(config_path=config_path, data_dir=self.paths.root)
+        self.profile = profile or str(self.config.get("profile", "default"))
+        self.dry_run = bool(dry_run or replay_dir)
+        if not self.dry_run and not armed:
+            raise RuntimeError("Live mode requires explicit per-run arming")
         self.current_mode = "idle"
+        self.running = True
+        self._paused = False
+        self._clock = clock
+        self._last_frame: Optional[CapturedFrame] = None
+        self._last_observation: Optional[TreasureObservation] = None
+        self.last_action: Optional[ActionResult] = None
+        self._pause_hotkey: Any = None
+        self._presence_streaks: dict[str, int] = {}
+        self._absence_streaks: dict[str, int] = {}
+        self._control_lock = threading.RLock()
+        self._rearm_after_pause = False
+        self._pause_requested = threading.Event()
+        self._stop_requested = threading.Event()
 
-        # 防卡死检测
-        self.last_activity = time.time()
-        self.stuck_count = 0
+        task_config = self.config.get("treasure_map", {})
+        recovery_config = self.config.get("recovery", {})
+        policy = TreasureMapPolicy(
+            stable_frames=int(recovery_config.get("stable_frames", 3)),
+            max_retries=int(task_config.get("max_action_retries", 3)),
+            death_timeout=float(recovery_config.get("death_scene_timeout_seconds", 60)),
+        )
+        self.machine = TreasureMapStateMachine(
+            max_maps=int(max_maps if max_maps is not None else task_config.get("max_maps", 10)),
+            policy=policy,
+            clock=clock,
+        )
+        self.poll_interval = max(0.05, float(task_config.get("poll_interval_seconds", 0.2)))
+        self.inventory_roi = tuple(task_config.get("inventory_roi", (0.4, 0.15, 0.6, 0.8)))
+        self.inventory_signature_enabled = bool(task_config.get("inventory_signature_enabled", False))
 
-        # 注册全局热键（用 pyautogui 兼容，避免与游戏按键冲突）
-        keyboard.on_press_key(LOOP.get("hotkey_pause", "f12"), self._on_pause)
-        keyboard.on_press_key(LOOP.get("hotkey_exit", "f11"), self._on_exit)
+        self.binding: Optional[WindowBinding] = None
+        if frame_source is None:
+            if replay_dir:
+                frame_source = ReplayFrameSource.from_directory(replay_dir)
+            else:
+                window_config = self.config.get("window", {})
+                preferred = window_config.get("preferred_hwnd")
+                self.binding = WindowBinding.bind(
+                    int(preferred) if preferred not in (None, "") else None,
+                    process_names=tuple(window_config.get("process_names", ())),
+                    title_contains=window_config.get("title_contains") or None,
+                )
+                frame_source = LiveWindowFrameSource(self.binding)
+        else:
+            self.binding = getattr(frame_source, "binding", None)
+        self.frame_source = frame_source
 
-        # UI 面板
-        self.ui = None
-        if enable_ui:
-            try:
-                from ui import MainWindow
-                self.ui = MainWindow(self)
-            except ImportError:
-                logger.info("PyQt5 未安装，跳过 UI 面板")
+        if not self.dry_run:
+            if not isinstance(self.frame_source, LiveWindowFrameSource) or self.binding is None:
+                self.frame_source.close()
+                raise RuntimeError(
+                    "Live mode requires a bound LiveWindowFrameSource; replay input is dry-run only"
+                )
+            if detector is not None:
+                self.frame_source.close()
+                raise RuntimeError("Live mode cannot use an injected detector")
 
-    def _record_activity(self):
-        """记录活动，用于防卡死检测"""
-        self.last_activity = time.time()
-        self.flow_control.record_op()
+        manifest_data, _manifest_path = load_template_manifest(self.paths.root, self.profile)
+        private_template_dir = self.paths.profile_templates(self.profile)
+        self.manifest = TemplateManifest.from_dict(manifest_data, base_dir=private_template_dir)
+        self.detector = detector or TemplateDetector(self.manifest)
+        self.detection_names = self._available_detection_names()
 
-    def _on_pause(self, e):
-        self.paused = not self.paused
-        logger.info(f"[{'PAUSED' if self.paused else 'RESUMED'}]")
+        if not self.dry_run:
+            status = validate_template_profile(
+                self.paths.root,
+                self.profile,
+                client_size=self.binding.client_size if self.binding else None,
+                dpi=self.binding.dpi if self.binding else None,
+            )
+            if not status.ready:
+                details = "\n - ".join(status.errors)
+                self.frame_source.close()
+                raise RuntimeError(f"Live mode is blocked until calibration is complete:\n - {details}")
 
-    def _on_exit(self, e):
-        logger.info("退出热键触发，准备退出...")
-        self.running = False
+        if executor is not None and bool(executor.dry_run) != self.dry_run:
+            raise ValueError("Injected executor dry_run mode must match AutoBot dry_run mode")
+        self.executor = executor or SafeActionExecutor(
+            dry_run=self.dry_run,
+            binding=self.binding,
+            forbidden_keys=("f9",),
+        )
+        self.executor.disarm()
+        if not self.dry_run:
+            executor_binding = self.executor.binding
+            if executor_binding is None or self.binding is None:
+                self.frame_source.close()
+                raise RuntimeError("Live executor must use the captured game-window binding")
+            if (int(executor_binding.hwnd) != int(self.binding.hwnd)
+                    or int(executor_binding.process_id) != int(self.binding.process_id)):
+                self.frame_source.close()
+                raise RuntimeError("Live executor binding does not match the capture HWND/process")
 
-    def run(self, mode: str = "quest", enable_ui: bool = False):
-        """启动主循环"""
-        self.current_mode = mode
-        logger.info(f"=== 启动自动脚本，模式: {mode} ===")
+        emergency_registered = False
+        if register_hotkeys:
+            safety_config = self.config.get("safety", {})
+            emergency_registered = self.executor.register_emergency_hotkey(
+                str(safety_config.get("emergency_stop_key", "f11"))
+            )
+            self._register_pause_hotkey(str(safety_config.get("pause_key", "f12")))
+        if not self.dry_run and not emergency_registered:
+            self._unregister_pause_hotkey()
+            self.frame_source.close()
+            raise RuntimeError(
+                "Live mode is blocked because the F11 emergency hotkey could not be registered"
+            )
+        if not self.dry_run and armed:
+            self.executor.arm()
 
-        # 启动 UI
-        if enable_ui and self.ui is None:
-            try:
-                from ui import MainWindow
-                self.ui = MainWindow(self)
-                self.ui.show()
-            except ImportError:
-                pass
+        commit_sha = os.environ.get("MHXY_BOT_GIT_SHA") or os.environ.get("MHXY_BOT_COMMIT", "unknown")
+        logger.info(
+            "Runtime ready: mode=treasure_map dry_run=%s profile=%s commit=%s data=%s",
+            self.dry_run,
+            self.profile,
+            commit_sha,
+            self.paths.root,
+        )
 
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    @paused.setter
+    def paused(self, value: bool) -> None:
+        value = bool(value)
+        if value:
+            # This event and executor disarm are intentionally outside the
+            # longer capture/decision transaction lock, so a control request
+            # can veto an action that has not started yet.
+            self._pause_requested.set()
+            was_armed = self.executor.armed
+            self.executor.pause()
+        with self._control_lock:
+            if value == self._paused:
+                return
+            if value:
+                self._rearm_after_pause = (
+                    was_armed and not self.executor.faulted and not self.executor.stopped
+                )
+                self.machine.suspend(self._clock())
+                # Publish paused only after input has been disarmed.
+                self._paused = True
+                logger.warning("Automation paused")
+                return
+            if self.executor.stopped:
+                logger.warning("Automation cannot resume after emergency stop")
+                return
+            self.executor.resume()
+            self.machine.resume_suspended(self._clock())
+            if self.machine.state.value == "captcha_pause":
+                self.machine.resume()
+            if not self.dry_run and self._rearm_after_pause:
+                # Restore only authority that existed before this pause. A
+                # backend fault/disarm can never be turned into a fresh arm.
+                self.executor.arm()
+            self._rearm_after_pause = False
+            self._pause_requested.clear()
+            # Publish resumed only after executor state/timers are restored.
+            self._paused = False
+            logger.info("Automation resumed")
+
+    def set_paused(self, paused: bool) -> None:
+        """Thread-safe launcher-facing pause API."""
+
+        self.paused = paused
+
+    def stop(self) -> None:
+        """Stop promptly and disarm input; safe to call from launcher controls."""
+
+        self._stop_requested.set()
+        self.executor.emergency_stop()
+        with self._control_lock:
+            self.running = False
+
+    def _register_pause_hotkey(self, key: str) -> None:
         try:
-            while self.running:
-                if self.paused:
-                    time.sleep(0.5)
-                    continue
+            import keyboard
 
-                # 1. 验证码检测（最高优先级）
-                if self._check_captcha():
-                    continue
+            self._pause_hotkey = keyboard.add_hotkey(key, lambda: setattr(self, "paused", not self.paused))
+        except Exception as exc:
+            logger.warning("Could not register pause hotkey %s: %s", key, exc)
 
-                # 2. 防卡死检测
-                if LOOP.get("stuck_detection", False):
-                    self._check_stuck()
-
-                # 3. 检测死亡（高优先级）
-                if self._check_death():
-                    self._handle_death()
-                    continue
-
-                # 4. 流控：接近上限时等待
-                self.flow_control.wait_if_needed()
-
-                # 5. 根据模式分发
-                getattr(self, f"_loop_{mode}")()
-
-        except KeyboardInterrupt:
-            logger.info("收到中断信号")
-        finally:
-            logger.info("脚本已退出")
-
-    def _check_stuck(self):
-        """检测是否卡住（长时间无活动）"""
-        stuck_timeout = LOOP.get("stuck_timeout", 60)
-        elapsed = time.time() - self.last_activity
-
-        if elapsed > stuck_timeout:
-            self.stuck_count += 1
-            logger.warning(f"卡住检测 ({self.stuck_count}/3) - {elapsed:.0f}s 无活动")
-
-            if self.stuck_count >= 3:
-                logger.warning("连续卡住，尝试恢复...")
-                self._recover_from_stuck()
-                self.stuck_count = 0
-        else:
-            self.stuck_count = max(0, self.stuck_count - 1)
-
-    def _recover_from_stuck(self):
-        """从卡住状态恢复"""
-        logger.info("执行恢复操作：按ESC关闭弹窗 → 重新检测")
-        self.input.esc(count=2)
-        time.sleep(1)
-
-    def _check_captcha(self) -> bool:
-        """检测并处理验证码，返回是否已处理"""
-        captcha_type = self.captcha_handler.detect_captcha()
-        if captcha_type:
-            logger.info(f"检测到验证码: {captcha_type.value}")
-            # 暂停主循环处理验证码
-            self.paused = True
-            if self.captcha_handler.handle_captcha_with_retry():
-                logger.info("验证码处理成功，恢复运行")
-                self.paused = False
-                return True
-            else:
-                logger.warning("验证码处理失败，等待手动处理")
-                return True
-        return False
-
-    # ─── 死亡检测与处理 ──────────────────────
-
-    def _check_death(self) -> bool:
-        """检测是否有窗口处于死亡状态"""
-        for i in range(len(self.wg.windows)):
-            result = self.screen.find_template("death_dialog", i)
-            if result:
-                logger.warning(f"窗口 {i} 检测到死亡对话框")
-                return True
-        return False
-
-    def _handle_death(self):
-        """处理死亡：所有号复活"""
-        logger.info("=== 检测到死亡，处理复活 ===")
-
-        for i in range(len(self.wg.windows)):
-            if self.screen.find_template("death_dialog", i):
-                gw, gh = self.wg.windows[i].width, self.wg.windows[i].height
-                # 点击复活按钮（对话框下方中央）
-                self.screen.wg.switch_to(i)
-                self.input.click(gw // 2, int(gh * 0.85), i)
-                time.sleep(1)
-
-        time.sleep(COMBAT.get("return_city_delay", 3000) / 1000.0)
-        logger.info("所有号已复活")
-        self._record_activity()
-
-    # ─── 模式循环 ────────────────────────────
-
-    def _loop_quest(self):
-        """师门/日常任务循环"""
-        leader = self.wg.leader
-
-        # 1. 队长检查并接任务
-        if leader.has_quest:
-            logger.info("[队长] 已有任务，导航完成")
-            self.navigator.go_to_objective(leader.index)
-            leader.has_quest = False
-        else:
-            self.navigator.go_to_next_quest(leader.index)
-
-        # 2. 队员检查任务标记
-        for i in range(1, len(self.wg.windows)):
-            if not self.wg.windows[i].has_quest:
-                all_markers = self.screen.wg.detect_quest_markers()
-                # 筛选属于该窗口的标记
-                my_markers = [(wi, x, y) for wi, x, y in all_markers if wi == i]
-                if my_markers:
-                    logger.info(f"[号{i+1}] 检测到任务标记")
-                    self.wg.windows[i].has_quest = True
-
-        # 3. 战斗处理
-        if self.combat.in_combat():
-            self.combat.fight(self.wg)
-
-        self._record_activity()
-
-    def _loop_ghost(self):
-        """捉鬼任务循环"""
-        leader = self.wg.leader
-
-        # 队长检查是否有鬼役NPC
-        if not self.screen.find_template("quest_npc_flag", 0):
-            logger.info("[队长] 检测不到鬼役NPC，去接捉鬼任务")
-            self.navigator.go_to_next_quest(0)
-            time.sleep(2)
+    def _unregister_pause_hotkey(self) -> None:
+        if self._pause_hotkey is None:
             return
+        try:
+            import keyboard
 
-        # 进入捉鬼战斗
-        if self.combat.in_combat():
-            self.combat.fight(self.wg)
-        else:
-            # 队长与鬼役对话进入
-            npc_pos = self.screen.find_template("quest_npc_flag", 0)
-            if npc_pos:
-                self.input.click(npc_pos[0], npc_pos[1], 0)
-                time.sleep(1)
+            keyboard.remove_hotkey(self._pause_hotkey)
+        except Exception:
+            logger.debug("Could not unregister pause hotkey", exc_info=True)
+        finally:
+            self._pause_hotkey = None
 
-                # 点击确认进入战斗
-                btn = self.screen.find_template("dialog_confirm", 0)
-                if btn:
-                    self.input.click(btn[0], btn[1], 0)
-                    time.sleep(2)
+    def _available_detection_names(self) -> tuple[str, ...]:
+        names = []
+        for name, rule in self.manifest.rules.items():
+            if rule.calibrated and self.manifest.template_path(name).is_file():
+                names.append(name)
+        missing = sorted(set(REQUIRED_TEMPLATES) - set(names))
+        if missing:
+            logger.warning("Uncalibrated/missing templates: %s", ", ".join(missing))
+        return tuple(names)
 
-        self._record_activity()
+    def _inventory_signature(self, frame: CapturedFrame, backpack_visible: bool) -> Optional[str]:
+        del frame, backpack_visible
+        # Whole-panel hashes react to hover/selection animation and can falsely
+        # count a map as consumed. This evidence source stays disabled until a
+        # slot/count-specific ROI can be calibrated from real-game captures.
+        return None
 
-    def _loop_escort(self):
-        """押镖循环"""
-        if self.combat.in_combat():
-            self.combat.fight(self.wg)
-        else:
-            logger.info("[押镖] 导航到镖师")
-            self.navigator.go_to_next_quest(0)
-
-        self._record_activity()
-
-    def _loop_dungeon(self):
-        """副本循环"""
-        if self.combat.in_combat():
-            self.combat.fight(self.wg)
-        else:
-            logger.info("[副本] 导航到副本入口")
-            self.navigator.go_to_next_quest(0)
-
-        self._record_activity()
-
-    def _loop_story(self):
-        """主线任务循环"""
-        if self.combat.in_combat():
-            self.combat.fight(self.wg)
-        else:
-            markers = self.screen.wg.detect_quest_markers()
-            if markers:
-                wi, x, y = markers[0]
-                gw = self.wg.windows[wi]
-                local_x, local_y = gw.screen_to_local(x, y)
-                logger.info(f"[主线] 任务标记 窗口{wi} @ ({x},{y}) → 局部({local_x},{local_y})")
-                self.input.click(local_x, local_y, wi)
+    def _observe(self, frame: CapturedFrame) -> TreasureObservation:
+        detections: dict[str, DetectionResult] = {}
+        if self.detection_names:
+            detections = self.detector.detect_many(
+                frame, self.detection_names, require_consecutive=False
+            )
+        for name in set(self.detection_names) | set(detections):
+            if name in detections:
+                self._presence_streaks[name] = self._presence_streaks.get(name, 0) + 1
+                self._absence_streaks[name] = 0
             else:
-                self.navigator.go_to_next_quest(0)
+                self._presence_streaks[name] = 0
+                self._absence_streaks[name] = self._absence_streaks.get(name, 0) + 1
+        if "active_treasure_task" in detections or "quest_target_marker" in detections:
+            task_active: Optional[bool] = True
+        elif "no_active_treasure_task" in detections:
+            task_active = False
+        else:
+            task_active = None
+        return TreasureObservation(
+            timestamp=float(frame.timestamp),
+            detections=detections,
+            inventory_signature=self._inventory_signature(frame, "backpack_open" in detections),
+            task_active=task_active,
+            metadata={"sequence": frame.sequence, "frame_size": frame.size},
+        )
 
-        self._record_activity()
+    def _postcondition_satisfied(self, name: str, obs: TreasureObservation) -> bool:
+        visible = set(obs.detections)
+        stable_frames = self.machine.policy.stable_frames
 
-    def _loop_treasure_map(self):
-        """藏宝图挖掘循环"""
-        logger.info("[藏宝图] 启动挖掘...")
-        self.treasure_map.run(max_maps=10)
-        self._record_activity()
+        def present(signal: str) -> bool:
+            return signal in visible and self._presence_streaks.get(signal, 0) >= stable_frames
+
+        def absent(signal: str) -> bool:
+            return signal not in visible and self._absence_streaks.get(signal, 0) >= stable_frames
+
+        if present(name):
+            return True
+        if name == "map_consumed_or_marker_visible":
+            return any(present(signal) for signal in (
+                "map_consumed", "quest_target_marker", "active_treasure_task"
+            )) or (present("backpack_open") and absent("treasure_map_icon"))
+        if name == "reward_or_combat_or_death":
+            return any(present(signal) for signal in (
+                "reward_dialog", "reward_confirm_button", "combat_hud_anchor",
+                "death_return_scene_anchor", "dig_success", "dig_failed"
+            ))
+        if name == "map_panel_closed":
+            return absent("map_panel_anchor")
+        if name == "backpack_closed":
+            return absent("backpack_open")
+        if name == "task_panel_closed":
+            return absent("task_panel_anchor")
+        if name == "reward_dialog_closed":
+            return absent("reward_dialog") and absent("reward_confirm_button")
+        return False
+
+    @staticmethod
+    def _is_input_intent(intent: ActionIntent) -> bool:
+        return intent.kind in {
+            ActionKind.CLICK,
+            ActionKind.DOUBLE_CLICK,
+            ActionKind.KEY,
+            ActionKind.HOTKEY,
+            ActionKind.INTERACT,
+        }
+
+    def _attach_capture_context(self, intent: ActionIntent, frame: CapturedFrame) -> ActionIntent:
+        metadata = dict(intent.metadata)
+        metadata.setdefault("reference_size", frame.size)
+        metadata["capture_sequence"] = frame.sequence
+        metadata["capture_timestamp"] = frame.timestamp
+        binding = frame.binding
+        if binding is not None:
+            metadata["capture_hwnd"] = binding.hwnd
+            metadata["capture_process_id"] = binding.process_id
+            metadata["capture_client_size"] = binding.client_size
+            metadata["capture_dpi"] = binding.dpi
+        return replace(intent, metadata=metadata)
+
+    def _save_diagnostic(self, frame: CapturedFrame, intent: Optional[ActionIntent], reason: str) -> Path:
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        stem = f"diagnostic-{timestamp}-{frame.sequence}"
+        image_path = save_frame(frame, self.paths.diagnostics / f"{stem}.png")
+        payload = {
+            "reason": reason,
+            "state": self.machine.snapshot(),
+            "frame": {"sequence": frame.sequence, "timestamp": frame.timestamp, "size": frame.size},
+            "intent": None if intent is None else {
+                "kind": _kind_value(intent),
+                "description": intent.description,
+                "metadata": dict(intent.metadata),
+            },
+        }
+        (self.paths.diagnostics / f"{stem}.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        logger.error("Diagnostic saved: %s", image_path)
+        return image_path
+
+    def tick_once(self) -> Optional[ActionResult]:
+        """Capture, decide and execute at most one intent."""
+
+        with self._control_lock:
+            if self._paused or self.executor.stopped:
+                return None
+            return self._tick_once_locked()
+
+    def _tick_once_locked(self) -> Optional[ActionResult]:
+        """Run one transaction while pause/resume controls are serialized."""
+
+        if self._pause_requested.is_set() or self._stop_requested.is_set() or self.executor.stopped:
+            return None
+        frame = self.frame_source.capture()
+        self._last_frame = frame
+        observation = self._observe(frame)
+        self._last_observation = observation
+        if self._pause_requested.is_set() or self._stop_requested.is_set() or self.executor.stopped:
+            return None
+
+        pending = self.executor.pending_postcondition
+        if pending and self._postcondition_satisfied(pending.name, observation):
+            self.executor.confirm_postcondition(pending.name)
+        elif pending:
+            stable_frames = self.machine.policy.stable_frames
+            stable_death = (
+                "death_return_scene_anchor" in observation.detections
+                and self._presence_streaks.get("death_return_scene_anchor", 0) >= stable_frames
+            )
+            stable_combat = (
+                "combat_hud_anchor" in observation.detections
+                and self._presence_streaks.get("combat_hud_anchor", 0) >= stable_frames
+            )
+            stable_captcha = (
+                "captcha_dialog" in observation.detections
+                and self._presence_streaks.get("captcha_dialog", 0) >= stable_frames
+            )
+            if stable_death or stable_captcha or stable_combat:
+                logger.info(
+                    "Invalidating pending postcondition %s after verified UI preemption",
+                    pending.name,
+                )
+                self.executor.abandon_postcondition(pending.name)
+
+        intent = self.machine.tick(observation)
+        if intent is not None and self._is_input_intent(intent) and (
+            self._pause_requested.is_set()
+            or self._stop_requested.is_set()
+            or self.executor.stopped
+        ):
+            self.machine.cancel_unexecuted_action(intent, observation.timestamp)
+            return None
+        self.executor.begin_tick(frame.sequence)
+        if intent is None:
+            return None
+
+        intent = self._attach_capture_context(intent, frame)
+
+        pending = self.executor.pending_postcondition
+        same_action = False
+        supersedes = set(intent.metadata.get("supersedes_postconditions", ()))
+        if pending is not None and pending.name in supersedes:
+            self.executor.abandon_postcondition(pending.name)
+            pending = None
+        if pending is not None and self._is_input_intent(intent):
+            same_action = bool(
+                intent.metadata.get("action_id")
+                and intent.metadata.get("action_id") == pending.intent.metadata.get("action_id")
+                and intent.postcondition == pending.name
+            )
+            retry_attempt = int(intent.metadata.get("attempt", 1))
+            if same_action and retry_attempt > 1:
+                self.executor.abandon_postcondition(pending.name)
+        if _kind_value(intent) == ActionKind.PAUSE.value:
+            # Preserve whether live authority existed before the executor's
+            # PAUSE control action disarms itself.
+            self.paused = True
+        result = self.executor.execute(intent)
+        self.last_action = result
+        if not result.accepted and result.reason in {"paused", "emergency_stop"}:
+            self.machine.cancel_unexecuted_action(intent, observation.timestamp)
+            if result.reason == "emergency_stop":
+                self.running = False
+            logger.info("Action cancelled by user control: %s", result.reason)
+            return result
+        self.machine.acknowledge_action(
+            intent,
+            accepted=result.accepted and (self.dry_run or result.performed),
+            timestamp=observation.timestamp,
+            reason=result.reason,
+        )
+        logger.info(
+            "Action: kind=%s accepted=%s performed=%s reason=%s state=%s",
+            _kind_value(intent), result.accepted, result.performed, result.reason,
+            self.machine.state.value,
+        )
+
+        if _kind_value(intent) == ActionKind.DIAGNOSTIC.value or intent.metadata.get("capture"):
+            self._save_diagnostic(frame, intent, str(intent.metadata.get("reason", intent.description)))
+        if _kind_value(intent) == ActionKind.STOP.value or intent.metadata.get("stop"):
+            self.running = False
+        if not result.accepted and self._is_input_intent(intent):
+            if result.reason != "postcondition_pending" or not same_action:
+                reason = f"executor_rejected:{result.reason}"
+                self.machine.abort(reason, observation.timestamp)
+                self.executor.disarm()
+                self.running = False
+                self._save_diagnostic(frame, intent, reason)
+        return result
+
+    def run(
+        self,
+        mode: str = "treasure_map",
+        enable_ui: bool = False,
+        max_maps: Optional[int] = None,
+    ) -> None:
+        del enable_ui
+        if mode != "treasure_map":
+            raise ValueError("The first release only supports treasure_map")
+        if max_maps is not None and int(max_maps) != self.machine.max_maps:
+            if self.machine.state.value != "ready":
+                raise RuntimeError("max_maps can only be changed before the workflow starts")
+            self.machine = TreasureMapStateMachine(
+                max_maps=int(max_maps), policy=self.machine.policy, clock=self._clock
+            )
+        self.current_mode = mode
+        logger.info("Treasure-map loop started")
+        try:
+            while self.running and not self.machine.stopped:
+                if self.executor.stopped:
+                    logger.warning("Executor emergency stop detected")
+                    self.running = False
+                    break
+                if self.paused:
+                    time.sleep(min(self.poll_interval, 0.2))
+                    continue
+                try:
+                    self.tick_once()
+                except StopIteration:
+                    logger.info("Replay completed")
+                    self.running = False
+                    break
+                time.sleep(self.poll_interval)
+        except KeyboardInterrupt:
+            logger.info("Interrupted")
+        except Exception as exc:
+            logger.exception("Runtime stopped by error: %s", exc)
+            if self._last_frame is not None:
+                self._save_diagnostic(self._last_frame, None, f"runtime_error:{exc}")
+            self.running = False
+            raise
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        self.running = False
+        self.executor.disarm()
+        self.executor.unregister_emergency_hotkey()
+        self._unregister_pause_hotkey()
+        self.frame_source.close()
+        logger.info("Runtime closed: %s", self.machine.snapshot())
+
+    def status(self) -> Mapping[str, Any]:
+        return {
+            **self.machine.snapshot(),
+            "running": self.running,
+            "paused": self.paused,
+            "dry_run": self.dry_run,
+            "armed": self.executor.armed,
+        }
 
 
-def main():
-    """入口"""
-    mode = "quest"
-    enable_ui = "--ui" in sys.argv
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="MHXY safe treasure-map assistant")
+    parser.add_argument("mode", nargs="?", default="treasure_map", choices=("treasure_map",))
+    parser.add_argument("--arm", action="store_true", help="enable live input for this run only")
+    parser.add_argument("--config", help="machine-local config.json")
+    parser.add_argument("--data-dir", help="override private runtime directory")
+    parser.add_argument("--profile", help="private calibration profile (defaults to config.json)")
+    parser.add_argument("--replay", help="directory containing replay screenshots (always dry-run)")
+    parser.add_argument("--ui", action="store_true", help="open the graphical launcher")
+    return parser
 
-    if len(sys.argv) > 1 and sys.argv[1] not in ("--ui",):
-        mode = sys.argv[1]
 
-    bot = AutoBot(enable_ui=enable_ui)
-    bot.run(mode, enable_ui=enable_ui)
+def main(argv: Optional[list[str]] = None) -> int:
+    args = _parser().parse_args(argv)
+    if args.ui:
+        from launcher import main as launcher_main
+
+        launcher_args: list[str] = []
+        if args.data_dir:
+            launcher_args.extend(("--data-dir", args.data_dir))
+        if args.config:
+            launcher_args.extend(("--config", args.config))
+        if args.profile:
+            launcher_args.extend(("--profile", args.profile))
+        return int(launcher_main(launcher_args) or 0)
+    try:
+        enable_dpi_awareness()
+        bot = AutoBot(
+            dry_run=not args.arm,
+            armed=args.arm,
+            config_path=args.config,
+            profile=args.profile,
+            data_dir=args.data_dir,
+            replay_dir=args.replay,
+        )
+        bot.run(args.mode)
+        return 0 if bot.machine.state.value in {"completed", "captcha_pause"} else 1
+    except (RuntimeError, ValueError, FileNotFoundError, WindowBindingError) as exc:
+        print(f"启动失败: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

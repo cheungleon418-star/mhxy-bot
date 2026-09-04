@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "profile": "default",
+  "coordinate_space": "normalized_client",
+  "client_size": null,
+  "dpi": null,
+  "notes": "Copy this manifest into the private profile directory, calibrate every entry, and keep all PNG files outside Git.",
+  "templates": {
+    "world_hud_anchor": {"file": "world_hud_anchor.png", "calibrated": false, "threshold": 0.9, "roi": [0.0, 0.0, 1.0, 0.3], "scales": [0.95, 1.0, 1.05], "stable_frames": 3},
+    "backpack_open": {"file": "backpack_open.png", "calibrated": false, "threshold": 0.9, "roi": [0.4, 0.1, 0.6, 0.85], "scales": [0.95, 1.0, 1.05], "stable_frames": 2},
+    "treasure_map_icon": {"file": "treasure_map_icon.png", "calibrated": false, "threshold": 0.9, "roi": [0.4, 0.15, 0.6, 0.8], "scales": [0.9, 0.95, 1.0, 1.05, 1.1], "stable_frames": 2},
+    "map_panel_anchor": {"file": "map_panel_anchor.png", "calibrated": false, "threshold": 0.9, "roi": [0.05, 0.05, 0.9, 0.9], "scales": [0.95, 1.0, 1.05], "stable_frames": 2},
+    "quest_target_marker": {"file": "quest_target_marker.png", "calibrated": false, "threshold": 0.88, "roi": [0.1, 0.1, 0.8, 0.8], "scales": [0.9, 0.95, 1.0, 1.05, 1.1], "stable_frames": 2},
+    "dig_interact_prompt": {"file": "dig_interact_prompt.png", "calibrated": false, "threshold": 0.9, "roi": [0.2, 0.45, 0.6, 0.5], "scales": [0.95, 1.0, 1.05], "stable_frames": 2},
+    "combat_hud_anchor": {"file": "combat_hud_anchor.png", "calibrated": false, "threshold": 0.92, "roi": [0.0, 0.0, 1.0, 0.35], "scales": [0.95, 1.0, 1.05], "stable_frames": 3},
+    "death_return_scene_anchor": {"file": "death_return_scene_anchor.png", "calibrated": false, "threshold": 0.92, "roi": [0.0, 0.0, 1.0, 1.0], "scales": [0.95, 1.0, 1.05], "stable_frames": 3},
+    "task_panel_anchor": {"file": "task_panel_anchor.png", "calibrated": false, "threshold": 0.92, "roi": [0.0, 0.0, 0.5, 1.0], "scales": [0.95, 1.0, 1.05], "stable_frames": 2},
+    "active_treasure_task": {"file": "active_treasure_task.png", "calibrated": false, "threshold": 0.92, "roi": [0.0, 0.1, 0.5, 0.8], "scales": [0.95, 1.0, 1.05], "stable_frames": 3},
+    "no_active_treasure_task": {"file": "no_active_treasure_task.png", "calibrated": false, "threshold": 0.92, "roi": [0.0, 0.1, 0.5, 0.8], "scales": [0.95, 1.0, 1.05], "stable_frames": 3},
+    "reward_dialog": {"file": "reward_dialog.png", "calibrated": false, "threshold": 0.9, "roi": [0.2, 0.15, 0.6, 0.7], "scales": [0.95, 1.0, 1.05], "stable_frames": 2},
+    "reward_confirm_button": {"file": "reward_confirm_button.png", "calibrated": false, "threshold": 0.92, "roi": [0.25, 0.45, 0.5, 0.45], "scales": [0.95, 1.0, 1.05], "stable_frames": 2},
+    "captcha_dialog": {"file": "captcha_dialog.png", "calibrated": false, "threshold": 0.94, "roi": [0.15, 0.1, 0.7, 0.8], "scales": [0.95, 1.0, 1.05], "stable_frames": 2},
+    "disconnect_dialog": {"file": "disconnect_dialog.png", "calibrated": false, "threshold": 0.94, "roi": [0.15, 0.1, 0.7, 0.8], "scales": [0.95, 1.0, 1.05], "stable_frames": 2}
+  }
+}

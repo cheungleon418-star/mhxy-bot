@@ -101,20 +101,12 @@ class StationCoachHandler:
         return False
 
     def _hide_interference(self, window_index: int):
-        """屏蔽商铺和玩家（F9 或游戏内设置）
-
-        梦幻西游支持 F9 键屏蔽玩家显示，减少干扰
-        """
-        logger.debug(f"[号{window_index+1}] 屏蔽干扰元素")
-
-        # F9 切换玩家显示（按两次确保进入正确状态）
-        self.input.key("f9", window_index)
-        time.sleep(0.3)
-        self.input.key("f9", window_index)
-        time.sleep(0.3)
-
-        # 也可以用屏蔽商铺设置（游戏内快捷键）
-        # 有些版本是 Alt+Y 或 Ctrl+F
+        """Legacy hook retained without changing player visibility."""
+        logger.warning(
+            "[号%s] 玩家显示切换必须由用户自行设置；程序不会发送 F9",
+            window_index + 1,
+        )
+        return False
 
     def _find_and_talk_coach(self, window_index: int,
                              max_retries: int = 3, retry_delay: float = 0.5) -> bool:

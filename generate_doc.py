@@ -370,7 +370,7 @@ for i, h in enumerate(hotkey_headers):
 hotkey_data = [
     ('F12', '暂停/恢复', '按一次暂停，再按一次恢复运行'),
     ('F11', '退出脚本', '安全退出脚本'),
-    ('F9', '自动战斗', '游戏中开启/关闭自动战斗'),
+    ('F9', '屏蔽其他玩家', '仅供用户在游戏内手动切换；程序不会发送'),
     ('Alt+Tab', '切换窗口', '手动切换到游戏窗口（不要用于脚本）'),
 ]
 for i, (key, func, desc) in enumerate(hotkey_data):

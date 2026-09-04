@@ -126,9 +126,14 @@ class InputSim:
         return self.key("j", window_index)
 
     def toggle_auto_combat(self, window_index: Optional[int] = None):
-        """开关自动战斗"""
-        logger.info(f"[{self.wg.current.name}] Toggling auto combat...")
-        return self.key("f9", window_index)
+        """Deprecated safety stub.
+
+        In this client F9 hides other players; it does not enable automatic
+        combat.  The supported treasure-map flow lets the game handle combat
+        and deliberately sends no combat input.
+        """
+        logger.warning("Automatic-combat input is disabled; F9 will not be sent")
+        return False
 
     def use_skill(self, slot: int, window_index: Optional[int] = None):
         """使用技能槽"""

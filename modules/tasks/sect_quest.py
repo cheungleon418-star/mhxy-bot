@@ -11,6 +11,7 @@
 流程：接任务 → 导航 → 完成任务 → 返回交任务
 """
 
+import random
 import time
 import logging
 from typing import Optional, List, Tuple

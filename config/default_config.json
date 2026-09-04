@@ -1,0 +1,35 @@
+{
+  "$schema": "./config.schema.json",
+  "schema_version": 1,
+  "mode": "treasure_map",
+  "profile": "default",
+  "window": {
+    "process_names": [
+      "my.exe",
+      "mhmain.exe",
+      "mhtab.exe",
+      "mhrender.exe"
+    ],
+    "title_contains": "梦幻西游",
+    "preferred_hwnd": null
+  },
+  "safety": {
+    "dry_run": true,
+    "armed": false,
+    "emergency_stop_key": "f11",
+    "pause_key": "f12"
+  },
+  "treasure_map": {
+    "max_maps": 10,
+    "max_action_retries": 2,
+    "poll_interval_seconds": 0.2,
+    "inventory_roi": [0.4, 0.15, 0.6, 0.8],
+    "inventory_signature_enabled": false
+  },
+  "recovery": {
+    "death_scene_timeout_seconds": 60,
+    "stable_frames": 3,
+    "disconnect_action": "stop",
+    "captcha_action": "pause"
+  }
+}

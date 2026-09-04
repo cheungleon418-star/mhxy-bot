@@ -1,28 +1,22 @@
 # -*- coding: utf-8 -*-
-"""
-战斗处理器 - 多账号协同
+"""Passive battle-state observer.
 
-回合制战斗逻辑：
-1. 检测战斗状态
-2. 按顺序给每个号使用技能
-3. 检测HP/MP，低时自动吃药
-4. 检测战斗结束，进入下一回合
+The game client owns automatic combat. This compatibility handler can inspect
+combat and resource bars, but every method that previously sent a combat key is
+disabled and ``fight`` never blocks.
 """
 
-import time
 import logging
-from typing import Optional, List
+from typing import Optional
 
 import cv2
 import numpy as np
-
-from config.settings import COMBAT, KEYS
 
 logger = logging.getLogger(__name__)
 
 
 class CombatHandler:
-    """战斗处理器"""
+    """Read-only compatibility facade for legacy mode loops."""
 
     def __init__(self, window_group, input_sim, screen_mgr):
         self.wg = window_group
@@ -32,7 +26,10 @@ class CombatHandler:
     def in_combat(self) -> bool:
         """检测是否处于战斗状态"""
         for i in range(len(self.wg.windows)):
-            if self.screen.find_template("combat_enemy_area", i):
+            # New calibrated profiles use combat_hud_anchor. Keep the old
+            # name as a read-only compatibility fallback.
+            if (self.screen.find_template("combat_hud_anchor", i)
+                    or self.screen.find_template("combat_enemy_area", i)):
                 self.wg.windows[i].in_combat = True
                 return True
         for win in self.wg.windows:
@@ -45,9 +42,8 @@ class CombatHandler:
         return 1 if pos else 0
 
     def switch_target(self):
-        """切换战斗目标"""
-        self.input.switch_target()
-        time.sleep(0.3)
+        """Disabled: combat is owned by the game's automatic battle mode."""
+        raise RuntimeError("Combat input is disabled; the game handles automatic battle")
 
     def check_hp_low(self, window_index: int = 0) -> Optional[float]:
         """检测窗口HP百分比
@@ -64,8 +60,9 @@ class CombatHandler:
         region = self.screen.capture_region(window_index, bar_x - win.x, bar_y - win.y, bar_w, bar_h)
 
         # 红色HP条颜色范围
-        lower = np.array([150, 20, 20], dtype=np.uint8)
-        upper = np.array([255, 100, 100], dtype=np.uint8)
+        # Captures are OpenCV BGR, so red is the final channel.
+        lower = np.array([20, 20, 150], dtype=np.uint8)
+        upper = np.array([100, 100, 255], dtype=np.uint8)
         mask = cv2.inRange(region, lower, upper)
 
         # 计算有颜色的像素占比
@@ -91,8 +88,9 @@ class CombatHandler:
         region = self.screen.capture_region(window_index, bar_x - win.x, bar_y - win.y, bar_w, bar_h)
 
         # 蓝色MP条颜色范围
-        lower = np.array([20, 30, 150], dtype=np.uint8)
-        upper = np.array([100, 100, 255], dtype=np.uint8)
+        # Captures are OpenCV BGR, so blue is the first channel.
+        lower = np.array([150, 30, 20], dtype=np.uint8)
+        upper = np.array([255, 100, 100], dtype=np.uint8)
         mask = cv2.inRange(region, lower, upper)
 
         total_pixels = bar_w * bar_h
@@ -105,77 +103,26 @@ class CombatHandler:
         return round(mp_percent, 1)
 
     def use_skill_on_account(self, account_index: int, skill_slot: int):
-        """给指定账号使用技能"""
-        win = self.wg.windows[account_index]
-        logger.debug(f"[号{account_index+1}] 使用技能槽 {skill_slot}")
-
-        self.wg.switch_to(account_index)
-        key = KEYS.get(f"skill_{skill_slot}", "f1")
-        self.input.key(key, account_index)
-        time.sleep(COMBAT.get("skill_interval", 300) / 1000.0)
+        """Disabled to guarantee that the assistant sends no combat keys."""
+        raise RuntimeError("Combat skill input is disabled; the game handles automatic battle")
 
     def use_potion(self, account_index: int, potion_type: str = "hp"):
-        """给指定账号使用药品"""
-        if potion_type == "hp":
-            self.input.use_hp_potion(account_index)
-        else:
-            self.input.use_mp_potion(account_index)
-        time.sleep(0.5)
+        """Disabled to guarantee that the assistant sends no combat keys."""
+        raise RuntimeError("Combat potion input is disabled; the game handles automatic battle")
 
     def fight(self, window_group):
-        """执行完整战斗流程"""
-        logger.info("=== 进入战斗 ===")
+        """Observe one combat frame without blocking or issuing input.
 
-        timeout = COMBAT.get("combat_timeout", 120)
-        start_time = time.time()
-        round_count = 0
-
-        while time.time() - start_time < timeout:
-            if self._check_combat_end():
-                break
-
-            round_count += 1
-            logger.info(f"--- 战斗回合 {round_count} ---")
-
-            # 按顺序给每个号使用技能
-            for i in range(len(window_group.windows)):
-                if not self._check_combat_end():
-                    break
-
-                win = window_group.windows[i]
-
-                # 检查HP/MP，低则吃药
-                hp = self.check_hp_low(i)
-                if hp is not None and hp < COMBAT.get("hp_potion_threshold", 60):
-                    logger.info(f"[号{i+1}] HP过低 ({hp}%)，使用药品")
-                    self.use_potion(i, "hp")
-                    continue
-
-                mp = self.check_mp_low(i)
-                if mp is not None and mp < COMBAT.get("mp_potion_threshold", 40):
-                    logger.info(f"[号{i+1}] MP过低 ({mp}%)，使用药品")
-                    self.use_potion(i, "mp")
-                    continue
-
-                # 使用技能
-                rotation = COMBAT.get("skill_rotation", [])
-                if rotation:
-                    skill_entry = rotation[(i + round_count) % len(rotation)]
-                    slot = skill_entry.get("slot", 1)
-                    self.use_skill_on_account(i, slot)
-                else:
-                    self.use_skill_on_account(i, 1)
-
-                time.sleep(COMBAT.get("switch_account_delay", 200) / 1000.0)
-
-            time.sleep(0.5)
-
-        if not self._check_combat_end():
-            logger.warning("战斗超时")
-        else:
-            logger.info("=== 战斗结束 ===")
-
+        The return value is ``True`` only when combat is no longer detected.
+        It is retained for legacy callers; the treasure workflow uses its own
+        COMBAT_WAIT state and does not call this method.
+        """
+        active = self.in_combat()
+        if active:
+            logger.debug("战斗中：由游戏内置自动战斗处理")
+            return False
         self._handle_combat_end()
+        return True
 
     def _check_combat_end(self) -> bool:
         """检测战斗是否结束"""
@@ -186,25 +133,6 @@ class CombatHandler:
         return False
 
     def _handle_combat_end(self):
-        """处理战斗结束 - 清掉所有对话框"""
-        time.sleep(COMBAT.get("combat_end_wait", 2000) / 1000.0)
-
-        for i in range(len(self.wg.windows)):
-            # 点击战斗结束对话框
-            dialog = self.screen.find_template("combat_end_dialog", i)
-            if dialog:
-                self.input.click(dialog[0], dialog[1], i)
-                time.sleep(1)
-
-            # 循环点击所有确认/奖励按钮（最多5次）
-            for _ in range(5):
-                btn = self.screen.find_template("dialog_confirm", i)
-                if btn:
-                    self.input.click(btn[0], btn[1], i)
-                    time.sleep(1)
-                else:
-                    break
-
-        # 清除战斗状态
+        """Clear passive flags only; result dialogs belong to task states."""
         for win in self.wg.windows:
             win.in_combat = False

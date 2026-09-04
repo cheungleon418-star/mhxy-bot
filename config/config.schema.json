@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/mhxy-bot/config.schema.json",
+  "title": "MHXY Bot runtime configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "mode", "profile", "window", "safety", "treasure_map", "recovery"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "schema_version": {"const": 1},
+    "mode": {"const": "treasure_map"},
+    "profile": {"type": "string", "pattern": "^[A-Za-z0-9_-]+$"},
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["process_names", "title_contains", "preferred_hwnd"],
+      "properties": {
+        "process_names": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "\\.[eE][xX][eE]$"}},
+        "title_contains": {"type": "string"},
+        "preferred_hwnd": {"type": ["integer", "null"], "minimum": 1}
+      }
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dry_run", "armed", "emergency_stop_key", "pause_key"],
+      "properties": {
+        "dry_run": {"const": true},
+        "armed": {"const": false},
+        "emergency_stop_key": {"const": "f11"},
+        "pause_key": {"const": "f12"}
+      }
+    },
+    "treasure_map": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_maps", "max_action_retries", "poll_interval_seconds", "inventory_roi", "inventory_signature_enabled"],
+      "properties": {
+        "max_maps": {"type": "integer", "minimum": 1, "maximum": 999},
+        "max_action_retries": {"type": "integer", "minimum": 1, "maximum": 10},
+        "poll_interval_seconds": {"type": "number", "minimum": 0.05, "maximum": 5},
+        "inventory_roi": {
+          "type": "array",
+          "prefixItems": [
+            {"type": "number", "minimum": 0, "maximum": 1},
+            {"type": "number", "minimum": 0, "maximum": 1},
+            {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+            {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+          ],
+          "minItems": 4,
+          "maxItems": 4
+        },
+        "inventory_signature_enabled": {"const": false}
+      }
+    },
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["death_scene_timeout_seconds", "stable_frames", "disconnect_action", "captcha_action"],
+      "properties": {
+        "death_scene_timeout_seconds": {"type": "number", "minimum": 5, "maximum": 300},
+        "stable_frames": {"type": "integer", "minimum": 2, "maximum": 20},
+        "disconnect_action": {"const": "stop"},
+        "captcha_action": {"const": "pause"}
+      }
+    }
+  }
+}

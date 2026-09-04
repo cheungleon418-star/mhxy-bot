@@ -17,6 +17,7 @@ from typing import Optional, List, Tuple
 
 import cv2
 import numpy as np
+import pyautogui
 
 from config.settings import TEMPLATES
 from core.window_group import WindowGroup
@@ -163,7 +164,6 @@ class BanditHuntHandler:
         self.input.click(x, y, window_index)
         time.sleep(0.5)
 
-        import pyautogui
         pyautogui.keyUp("ctrl")
 
         return self._check_dialog_open(window_index)

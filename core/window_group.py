@@ -188,12 +188,11 @@ class WindowGroup:
 
         from config.settings import MATCH_THRESHOLD
         if max_val >= MATCH_THRESHOLD:
-            # 将匹配位置转换回原始坐标空间
-            # max_loc 是 resized 坐标，需要：
-            # 1. 加回 ROI 偏移
-            # 2. 除以缩放比例还原到原始坐标
-            local_x = int((max_loc[0] + roi_offset[0]) / scale)
-            local_y = int((max_loc[1] + roi_offset[1]) / scale)
+            # Convert the *match centre* back into original client pixels.
+            # The ROI origin is already expressed in original pixels and must
+            # never be divided by the search-image scale.
+            local_x = roi_offset[0] + int(round(max_loc[0] / scale)) + tw // 2
+            local_y = roi_offset[1] + int(round(max_loc[1] / scale)) + th // 2
             return (local_x, local_y)
 
         return None
@@ -218,12 +217,13 @@ class WindowGroup:
         for i in range(len(self.windows)):
             win = self.windows[i]
 
-            # 在窗口内检测金色/黄色标记
+            # Capture is BGR. Convert explicitly before applying the yellow
+            # hue range; treating an RGB tuple as BGR produced false markers.
             screen = self.capture(i)
-            yellow = (180, 180, 50)
-            lower = np.array([max(0, c - 60) for c in yellow])
-            upper = np.array([min(255, c + 60) for c in yellow])
-            mask = cv2.inRange(screen, lower, upper)
+            hsv = cv2.cvtColor(screen, cv2.COLOR_BGR2HSV)
+            lower = np.array([18, 90, 100], dtype=np.uint8)
+            upper = np.array([42, 255, 255], dtype=np.uint8)
+            mask = cv2.inRange(hsv, lower, upper)
 
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             for contour in contours:

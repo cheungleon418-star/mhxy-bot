@@ -36,11 +36,33 @@ class ScreenManager:
         return self.wg.detect_quest_markers()
 
     def find_color_in_window(self, window_index: int, color: Tuple[int, int, int],
-                              tolerance: int = 30) -> Optional[Tuple[int, int]]:
-        """在指定窗口中查找颜色"""
+                              tolerance: int = 30,
+                              color_space: str = "BGR") -> Optional[Tuple[int, int]]:
+        """Find a colour and return its largest region's client-space centre.
+
+        Captures use OpenCV BGR. ``color_space`` makes RGB/HSV callers explicit
+        and prevents silently applying thresholds to the wrong channel order.
+        """
         screen = self.capture(window_index)
-        lower = np.array([max(0, c - tolerance) for c in color])
-        upper = np.array([min(255, c + tolerance) for c in color])
+        space = color_space.upper()
+        limits = (255, 255, 255)
+        if space == "RGB":
+            target = tuple(reversed(color))
+        elif space == "BGR":
+            target = color
+        elif space == "HSV":
+            screen = cv2.cvtColor(screen, cv2.COLOR_BGR2HSV)
+            target = color
+            limits = (179, 255, 255)
+        else:
+            raise ValueError("color_space must be BGR, RGB, or HSV")
+        lower = np.array(
+            [max(0, channel - tolerance) for channel in target], dtype=np.uint8
+        )
+        upper = np.array(
+            [min(limit, channel + tolerance) for channel, limit in zip(target, limits)],
+            dtype=np.uint8,
+        )
         mask = cv2.inRange(screen, lower, upper)
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
