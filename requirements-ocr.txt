@@ -1,0 +1,4 @@
+# Optional: the treasure-map v1 flow does not require OCR.
+# Paddle's Windows/Python wheel availability varies, so it is isolated here.
+paddleocr>=2.8,<3
+paddlepaddle>=2.6,<3

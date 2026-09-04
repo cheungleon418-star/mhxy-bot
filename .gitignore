@@ -1,4 +1,77 @@
+# Python environments, bytecode and test caches
+.venv/
+venv/
+env/
 __pycache__/
-*.pyc
-logs/*.log
-templates/*.png
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build/package output (the legacy installer is intentionally not rebuilt)
+build/
+dist/
+release/
+*.spec
+*.exe
+*.msi
+*.zip
+*.7z
+*.rar
+
+# Runtime state must remain outside Git
+/logs/
+/captures/
+/diagnostics/
+/templates/
+**/logs/**
+**/captures/**
+**/diagnostics/**
+**/templates/**
+*.log
+
+# Real images and recordings are private calibration material
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.webp
+*.gif
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.wmv
+
+# Machine-local configuration and secrets
+/config.json
+**/config.json
+config.local.json
+*.local.json
+*private-config*.json
+*private_config*.json
+*config-private*.json
+*config_private*.json
+*local-config*.json
+*local_config*.json
+*config-local*.json
+*config_local*.json
+.env
+.env.*
+!.env.example
+
+# Additional private bundles and local databases
+*.tar
+*.tar.gz
+*.tgz
+*.sqlite
+*.sqlite3
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini

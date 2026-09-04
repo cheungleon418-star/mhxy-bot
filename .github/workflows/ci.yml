@@ -1,0 +1,46 @@
+name: Windows Python 3.11 CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: Compile sources
+        run: python -m compileall -q config core modules launcher.py main.py
+      - name: Parse PowerShell scripts with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $allErrors = @()
+          Get-ChildItem -LiteralPath scripts -Filter *.ps1 | ForEach-Object {
+            $tokens = $null
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$tokens,
+              [ref]$parseErrors
+            ) | Out-Null
+            $allErrors += @($parseErrors)
+          }
+          if ($allErrors.Count -gt 0) {
+            $allErrors | Format-List
+            exit 1
+          }
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+      - name: Check repository hygiene
+        shell: pwsh
+        run: ./scripts/check_repo_hygiene.ps1
